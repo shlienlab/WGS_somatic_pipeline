@@ -1,0 +1,922 @@
+import csv
+import os
+import sys
+from jinja2 import Template
+from subprocess import Popen, PIPE
+import argparse
+import uuid
+import gzip
+import ast
+import config
+
+
+DUMMY_GRIDS_DIR = "/dummy/dir"
+SAMPLE_TYPE_N = "N"
+SAMPLE_TYPE_T = "T"
+
+
+def parse_fastq_tsv_file(file_path):
+    """Purpose: parse a fastq input tsv file
+    Inputs:
+        - file_path: path to the tsv file of the format specified by
+            example_files/example_fastq_input.tsv
+    Output: ([patient ids], {patient:sex}, {patient:[tumor sample ids]},
+                {patient:[normal sample ids]}, {patient:{sample:[lanes]}},
+                {patient:{sample:library}}, {patient:{sample:[fq1, fq2]}})
+    """
+    patients = []
+    sexes = {}
+    tumor_samples = {}
+    normal_samples = {}
+    lanes = {}
+    libraries = {}
+    fastqs = {}
+    with open(file_path, "r") as tab_file:
+        tab = csv.reader(tab_file, dialect="excel-tab")
+        tab_data = []
+        for line in tab:
+            if len(line) != 7:
+                sys.exit(
+                    "Error: TSV file not the correct format.\n"
+                    "Error in this line" + str(line) + "\n"
+                )
+
+            tab_data.append(line)
+
+        tab_data = tab_data[1:]
+        for line in tab_data:
+            patient = line[0]
+            sex = line[1]
+            sample = line[2]
+            sample_type = line[3]
+            library = line[4]
+            fq1 = line[5]
+            fq2 = line[6]
+            lane = 0
+
+            if not patient in patients:
+                patients.append(patient)
+                sexes[patient] = sex
+                tumor_samples[patient] = []
+                normal_samples[patient] = []
+                lanes[patient] = {}
+                libraries[patient] = {}
+                fastqs[patient] = {}
+
+            if (sample in tumor_samples[patient]) or (
+                sample in normal_samples[patient]
+            ):
+                lane = len(lanes[patient][sample])
+            else:
+                if sample_type == SAMPLE_TYPE_T:
+                    tumor_samples[patient].append(sample)
+                elif sample_type == SAMPLE_TYPE_N:
+                    normal_samples[patient].append(sample)
+                else:
+                    sys.exit(
+                        sample_type
+                        + " is not a valid sample type. Please check input file."
+                    )
+
+                libraries[patient][sample] = library
+                fastqs[patient][sample] = []
+                lanes[patient][sample] = []
+
+            lanes[patient][sample].append(lane)
+            if os.path.exists(fq1) and os.path.exists(fq2):
+                if not os.path.islink(fq1) and not os.path.islink(fq2):
+                    fastqs[patient][sample].append([fq1, fq2])
+                else:
+                    print("One or more fastq files given are links: " + str(line))
+                    sys.exit("Linked files are not accepted")
+            else:
+                print("One or more of the fastq files given do not exist: " + str(line))
+                sys.exit("Please provide files that exist")
+
+    return (patients, sexes, tumor_samples, normal_samples, lanes, libraries, fastqs)
+
+
+def parse_bam_tab_file(file_path):
+    """Purpose: parse a bam input file
+    Inputs:
+        - file_path: path to the tsv file of the format specified by
+            example_files/example_bam_input.tsv
+    Output: ([patient ids], {patient:sex}, {patient:[tumor sample ids]},
+                {patient:[normal sample ids]},
+                {patient:[{"Left":sample, "Right":tumor bam}]},
+                {patient:[{"Left":sample, "Right":normal bam}]})
+    """
+    patients = []
+    sexes = {}
+    tumor_samples = {}
+    normal_samples = {}
+    tumor_bams = {}
+    normal_bams = {}
+    with open(file_path, "r") as tab_file:
+        tab = csv.reader(tab_file, dialect="excel-tab")
+        tab_data = []
+        for line in tab:
+            if len(line) != 5:
+                sys.exit(
+                    "Error: TSV file not the correct format.\n"
+                    "Error in this line" + str(line) + "\n"
+                )
+
+            tab_data.append(line)
+
+        tab_data = tab_data[1:]
+        for line in tab_data:
+            patient = line[0]
+            sex = line[1]
+            sample = line[2]
+            sample_type = line[3]
+            bam = line[4]
+
+            if not patient in patients:
+                patients.append(patient)
+                sexes[patient] = sex
+                tumor_samples[patient] = []
+                normal_samples[patient] = []
+                normal_bams[patient] = []
+                tumor_bams[patient] = []
+
+            if sample_type == SAMPLE_TYPE_N:
+                normal_samples[patient].append(sample)
+                if os.path.exists(bam) and not os.path.islink(bam):
+                    normal_bams[patient].append(
+                        {"Left": sample, "Right": {"Left": bam, "Right": "None"}}
+                    )
+                else:
+                    print("Supplied bam doesn't exist" + str(line))
+                    sys.exit(1)
+            elif sample_type == SAMPLE_TYPE_T:
+                tumor_samples[patient].append(sample)
+                if os.path.exists(bam) and not os.path.islink(bam):
+                    tumor_bams[patient].append(
+                        {"Left": sample, "Right": {"Left": bam, "Right": "None"}}
+                    )
+            else:
+                sys.exit(
+                    sample_type
+                    + " is not a valid sample type. Please check input file."
+                )
+
+    return (patients, sexes, tumor_samples, normal_samples, tumor_bams, normal_bams)
+
+
+def create_dir(new_dir):
+    """Purpose: Creates the necessary directories inside a sample directory
+    Inputs:
+        - new_dir: the sample directory
+    Output: None
+    """
+    if os.path.exists(new_dir):
+        print("Warning: " + new_dir + " already exists.")
+
+    os.makedirs(new_dir + config.PROGRESS_DIR_RELATIVE, exist_ok=True)
+    os.makedirs(new_dir + config.RUN_DIR_RELATIVE, exist_ok=True)
+
+
+def copy_wdl(workflow, out_dir):
+    """Purpose: Puts a gzipped copy of a WDL file inside the run_info directory in out_dir
+    Inputs:
+        - workflow: the WDL file to be copied
+        - out_dir: a directory created by create_dir()
+    Output: None
+    """
+    wdl_copy = (
+        out_dir + config.RUN_DIR_RELATIVE + "/" + os.path.basename(workflow) + ".gz"
+    )
+    with open(workflow, "rb") as f_in:
+        with gzip.open(wdl_copy, "wb") as f_out:
+            f_out.writelines(f_in)
+
+
+def write_run_info(run_dir, out_dir):
+    """Purpose: Creates a file in the run_info directory inside out_dir specifying
+        where the sample was ran from
+    Inputs:
+        - run_dir: the directory the sample is being ran from
+        - out_dir: a directory created by create_dir()
+    Output: None
+    """
+    with open(out_dir + config.RUN_DIR_RELATIVE + "/ran_from.txt", "w") as run_info:
+        run_info.write(run_dir + "\n")
+
+
+def prepare_directories(
+    patient, tumor_samples, normal_samples, a_out, ssm_out, sv_out, cnv_out, gridss_out
+):
+    """Purpose: Create the necessary directory structure
+    Inputs:
+        - patient: patient ID
+        - tumor_samples: list of tumor sample IDs
+        - normal_samples: list of normal sample IDs
+        - a_out: alignment output directory
+        - ssm_out: SSM outut directory
+        - sv_out: SV outut directory
+        - cnv_out: CNV outut directory
+    Output: (run_dir, {sample: align out dir}, {tumor: {normal: ssm out dir}},
+        {tumor: {normal: sv out dir}}, {tumor: {normal: cnv out dir}})
+    """
+    run_dir = None
+    a_dirs = None
+    ssm_dirs = None
+    sv_dirs = None
+    cnv_dirs = None
+    gridss_dirs = None
+
+    if a_out is not None:
+        a_dirs = {}
+        for sample in normal_samples:
+            out_dir = a_out + "/" + patient + "/N_-_" + sample
+            create_dir(out_dir)
+            a_dirs[sample] = out_dir
+            copy_wdl(config.ALIGN_WORFKLOW_FILE, out_dir)
+            if run_dir is None:
+                run_dir = out_dir + config.RUN_DIR_RELATIVE
+            else:
+                write_run_info(run_dir, out_dir)
+
+        for sample in tumor_samples:
+            out_dir = a_out + "/" + patient + "/T_-_" + sample
+            create_dir(out_dir)
+            a_dirs[sample] = out_dir
+            copy_wdl(config.ALIGN_WORFKLOW_FILE, out_dir)
+            if run_dir is None:
+                run_dir = out_dir + config.RUN_DIR_RELATIVE
+            else:
+                write_run_info(run_dir, out_dir)
+
+    if (len(normal_samples) > 0) and (len(tumor_samples) > 0):
+        if ssm_out is not None:
+            ssm_dirs = {}
+            for tumor_sample in tumor_samples:
+                ssm_dirs[tumor_sample] = {}
+                for normal_sample in normal_samples:
+                    out_dir = (
+                        ssm_out
+                        + "/"
+                        + patient
+                        + "/"
+                        + "N_-_"
+                        + normal_sample
+                        + "+T_-_"
+                        + tumor_sample
+                    )
+                    create_dir(out_dir)
+                    ssm_dirs[tumor_sample][normal_sample] = out_dir
+                    copy_wdl(config.SSM_WORKFLOW_FILE, out_dir)
+                    if run_dir is None:
+                        run_dir = out_dir + config.RUN_DIR_RELATIVE
+                    else:
+                        write_run_info(run_dir, out_dir)
+
+        if sv_out is not None:
+            sv_dirs = {}
+            for tumor_sample in tumor_samples:
+                sv_dirs[tumor_sample] = {}
+                for normal_sample in normal_samples:
+                    out_dir = (
+                        sv_out
+                        + "/"
+                        + patient
+                        + "/"
+                        + "N_-_"
+                        + normal_sample
+                        + "+T_-_"
+                        + tumor_sample
+                    )
+                    create_dir(out_dir)
+                    sv_dirs[tumor_sample][normal_sample] = out_dir
+                    copy_wdl(config.SV_WORKFLOW_FILE, out_dir)
+                    if run_dir is None:
+                        run_dir = out_dir + config.RUN_DIR_RELATIVE
+                    else:
+                        write_run_info(run_dir, out_dir)
+
+        if cnv_out is not None:
+            cnv_dirs = {}
+            for tumor_sample in tumor_samples:
+                cnv_dirs[tumor_sample] = {}
+                for normal_sample in normal_samples:
+                    out_dir = (
+                        cnv_out
+                        + "/"
+                        + patient
+                        + "/"
+                        + "N_-_"
+                        + normal_sample
+                        + "+T_-_"
+                        + tumor_sample
+                    )
+                    create_dir(out_dir)
+                    cnv_dirs[tumor_sample][normal_sample] = out_dir
+                    copy_wdl(config.CNV_WORKFLOW_FILE, out_dir)
+                    if run_dir is None:
+                        run_dir = out_dir + config.RUN_DIR_RELATIVE
+                    else:
+                        write_run_info(run_dir, out_dir)
+
+        if gridss_out is not None:
+            gridss_dirs = {}
+            for tumor_sample in tumor_samples:
+                gridss_dirs[tumor_sample] = {}
+                for normal_sample in normal_samples:
+                    out_dir = (
+                        gridss_out
+                        + "/"
+                        + patient
+                        + "/"
+                        + "N_-_"
+                        + normal_sample
+                        + "+T_-_"
+                        + tumor_sample
+                    )
+                    create_dir(out_dir)
+                    gridss_dirs[tumor_sample][normal_sample] = out_dir
+                    copy_wdl(config.GRIDSS_WORKFLOW_FILE, out_dir)
+                    if run_dir is None:
+                        run_dir = out_dir + config.RUN_DIR_RELATIVE
+                    else:
+                        write_run_info(run_dir, out_dir)
+
+    if gridss_dirs is None:
+        gridss_dirs = {}
+        for sample in normal_samples + tumor_samples:
+            gridss_dirs[sample] = {}
+            gridss_dirs[sample][sample] = DUMMY_GRIDS_DIR
+        # for tumor_sample in tumor_samples:
+        #     gridss_dirs[tumor_sample] = {}
+        #     for normal_sample in normal_samples:
+        #         out_dir = DUMMY_GRIDS_DIR + "/" + patient + "/" + "N_-_" + normal_sample + "+T_-_" + tumor_sample
+        #         # create_dir(out_dir)
+        #         gridss_dirs[tumor_sample][normal_sample] = out_dir
+        #         # copy_wdl(GRIDSS_WORKFLOW_FILE, out_dir)
+        #         if run_dir is None:
+        #             run_dir = out_dir + RUN_DIR_RELATIVE
+        #         else:
+        #             pass
+        #             # write_run_info(run_dir, out_dir)
+
+    return (run_dir, a_dirs, ssm_dirs, sv_dirs, cnv_dirs, gridss_dirs)
+
+
+def create_inputs_file(
+    run_dir,
+    a_dirs,
+    ssm_dirs,
+    sv_dirs,
+    cnv_dirs,
+    gridss_dirs,
+    patient,
+    normal_samples,
+    tumor_samples,
+    fastqs,
+    lanes,
+    uuids,
+    libraries,
+    normal_bams,
+    tumor_bams,
+    sex,
+    repo_dir,
+    environment,
+    run_GRIDSS,
+):
+    """Purpose: Creates the inputs file for cromwell
+    Inputs:
+        - run_dir: the directory the sample is being ran from
+        - a_dirs, ssm_dirs, sv_dirs, cnv_dirs: output dirs from prepare_directories
+        - patient normal_samples, tumor_samples, fastqs, lanes, uuids,
+            libraries, normal_bams, tumor_bams, sex: info from TSV file
+        - repo_dir: repository directory
+        - environment: CLOUD or LOCAL; the backend where the workflow will be run
+    Output: path of the inputs file
+    """
+    # write inputs file
+    inputs_file = run_dir + "/" + patient + "_analysis_inputs.json"
+    with open(config.INPUTS_TEMPLATE_FILE_PATH, "r") as inputs_template_file:
+        inputs_template = Template(inputs_template_file.read())
+        rendered_template = inputs_template.render(
+            a_dirs=a_dirs,
+            ssm_dirs=ssm_dirs,
+            sv_dirs=sv_dirs,
+            cnv_dirs=cnv_dirs,
+            gridss_dirs=gridss_dirs,
+            patient=patient,
+            normal_samples=normal_samples,
+            tumor_samples=tumor_samples,
+            fastqs=fastqs,
+            lanes=lanes,
+            uuids=uuids,
+            libraries=libraries,
+            normal_bams=normal_bams,
+            tumor_bams=tumor_bams,
+            sex=sex,
+            repo_dir=config.REPO_PATH,
+            environment=environment,
+            run_GRIDSS=run_GRIDSS,
+            random_number=str(config.RESOURCE_ELEMENTS[config.RESOURCE_ELEMENT_TO_USE]),
+        )
+
+        if config.RESOURCE_ELEMENT_TO_USE == len(config.RESOURCE_ELEMENTS) - 1:
+            config.RESOURCE_ELEMENT_TO_USE = 0
+        else:
+            config.RESOURCE_ELEMENT_TO_USE += 1
+        config.save_resource_to_use(config.RESOURCE_ELEMENT_TO_USE)
+
+        with open(inputs_file, "w") as inputs_file_object:
+            inputs_file_object.write(rendered_template)
+
+    return inputs_file
+
+
+def create_execution_script(run_dir, patient, inputs_file, environment, custom_inputs):
+    """Purpose: Creates and submits the execution script
+    Inputs:
+        - run_dir: the directory the sample is being ran from
+        - patient: patient ID
+        - inputs_file: the cromwell inputs file created by create_inputs_file()
+        - custom_inputs: if True, will not submit the script
+    Output: None
+    """
+    # create directory for cromwell logs
+    cromwell_log_dir = run_dir + "/" + config.CROMWELL_LOG_DIR_NAME
+    os.makedirs(cromwell_log_dir, exist_ok=True)
+
+    # write script to execute cromwell
+    execution_name = patient + "_analysis"
+    execute_script = run_dir + "/" + execution_name + ".sh"
+    with open(config.EXECUTE_TEMPLATE_FILE_PATH, "r") as execute_template_file:
+        execute_script_template = Template(execute_template_file.read())
+        rendered_template = execute_script_template.render(
+            execution_name=execution_name,
+            log_dir=cromwell_log_dir,
+            java_version=config.CROMWELL_JAVA_VERSION,
+            execution_dir=config.CROMWELL_EXECUTION_DIRECTORY,
+            cromwell_config_path=config.CONFIG_FILE,
+            cromwell_jar_path=config.CROMWELL_JAR_PATH,
+            workflow_path=config.ENTRY_WORKFLOW_FILE,
+            cromwell_cloud_url=config.CROMWELL_CLOUD_URL,
+            inputs_path=inputs_file,
+            environment=environment,
+        )
+        with open(execute_script, "w") as execute_script_object:
+            execute_script_object.write(rendered_template)
+
+    if custom_inputs is False:
+        # submit execute_cnv job
+        if environment == "LOCAL":
+            (execute_job, execute_err) = Popen(
+                ["qsub", execute_script], stdout=PIPE, stderr=PIPE
+            ).communicate()
+            execute_job = str(execute_job)[2:-3]
+            print("Submitted local job " + execute_job + ": " + execution_name)
+            print("Run info located in " + run_dir)
+        elif environment == "CLOUD":
+            (execute_job, execute_err) = Popen(
+                ["bash", execute_script], stdout=PIPE, stderr=PIPE
+            ).communicate()
+            response = ast.literal_eval(execute_job.decode("UTF-8"))
+            status = response.get("status")
+            if status == "fail":
+                message = response.get("message")
+                sys.exit(
+                    "Error submitting cloud workflow for patient {}:\n{}".format(
+                        patient, message
+                    )
+                )
+            else:
+                workflow_id = response.get("id")
+                print("Submitted cloud job " + workflow_id + ": " + execution_name)
+                print("Status: " + status)
+                print("Run info located in " + run_dir)
+    else:
+        executor = "qsub" if environment == "LOCAL" else "bash"
+        print(
+            "After adding your custom inputs to " + inputs_file + ", run '" + executor,
+            execute_script,
+            environment + "'",
+        )
+
+
+def search_and_resume(script_name, search_dir):
+    """Purpose: Resursively search search_dir to find script_name and resubmit it
+    Inputs:
+        - script_name: script to search for and resubmit
+        - search_dir: directory to search recursively
+    Output: True if found, False if not
+    """
+    for (dirpath, dirnames, filenames) in os.walk(search_dir):
+        if script_name in filenames:
+            (execute_job, execute_err) = Popen(
+                ["qsub", dirpath + "/" + script_name], stdout=PIPE, stderr=PIPE
+            ).communicate()
+            execute_job = str(execute_job)[2:-3]
+            print("Resubmitted " + script_name + ": " + execute_job)
+            return True
+    return False
+
+
+def resume_analyses(patients, a_out, ssm_out, sv_out, cnv_out, gridss_out):
+    """Purpose: Resume an analysis
+    Inputs:
+        - patients: a list of patient IDs
+        - a_out, ssm_out, sv_out, cnv_out: output directories
+    Output: None
+    """
+    for patient in patients:
+        script_name = patient + "_analysis.sh"
+        if a_out is not None:
+            search_dir = a_out + "/" + patient
+            if search_and_resume(script_name, search_dir):
+                continue
+        if ssm_out is not None:
+            search_dir = ssm_out + "/" + patient
+            if search_and_resume(script_name, search_dir):
+                continue
+        if sv_out is not None:
+            search_dir = sv_out + "/" + patient
+            if search_and_resume(script_name, search_dir):
+                continue
+        if cnv_out is not None:
+            search_dir = cnv_out + "/" + patient
+            if search_and_resume(script_name, search_dir):
+                continue
+        if gridss_out is not None:
+            search_dir = gridss_out + "/" + patient
+            if search_and_resume(script_name, search_dir):
+                continue
+        print("Failed to resubmit patient " + patient)
+
+
+def start_fastq_analysis(
+    sample_tsv,
+    a_out,
+    ssm_out,
+    sv_out,
+    cnv_out,
+    gridss_out,
+    environment,
+    resume,
+    custom_inputs,
+):
+    """Purpose: Start analysis with FASTQ input
+    Inputs:
+        - sample_tsv: the input FASTQ TSV
+        - a_out, ssm_out, sv_out, cnv_out: output directories
+        - resume: if True, only resubmit scripts to the HPF
+        - custom_inputs: if True, will not submit the script
+    Output: None
+    """
+    (
+        patients,
+        sexes,
+        tumor_samples,
+        normal_samples,
+        lanes,
+        libraries,
+        fastqs,
+    ) = parse_fastq_tsv_file(sample_tsv)
+
+    if resume:
+        resume_analyses(patients, a_out, ssm_out, sv_out, cnv_out, gridss_out)
+        return
+
+    for patient in patients:
+        (
+            run_dir,
+            a_dirs,
+            ssm_dirs,
+            sv_dirs,
+            cnv_dirs,
+            gridss_dirs,
+        ) = prepare_directories(
+            patient=patient,
+            tumor_samples=tumor_samples[patient],
+            normal_samples=normal_samples[patient],
+            a_out=a_out,
+            ssm_out=ssm_out,
+            sv_out=sv_out,
+            cnv_out=cnv_out,
+            gridss_out=gridss_out,
+        )
+
+        uuids = {}
+        all_samples = tumor_samples[patient] + normal_samples[patient]
+        for sample in all_samples:
+            ids = []
+            for lane in lanes[patient][sample]:
+                one_id = uuid.uuid4()
+                ids.append(str(one_id))
+
+            uuids[sample] = ids
+
+        inputs_file = create_inputs_file(
+            run_dir=run_dir,
+            a_dirs=a_dirs,
+            ssm_dirs=ssm_dirs,
+            sv_dirs=sv_dirs,
+            cnv_dirs=cnv_dirs,
+            gridss_dirs=gridss_dirs,
+            patient=patient,
+            normal_samples=normal_samples[patient],
+            tumor_samples=tumor_samples[patient],
+            fastqs=fastqs[patient],
+            lanes=lanes[patient],
+            uuids=uuids,
+            libraries=libraries[patient],
+            normal_bams=None,
+            tumor_bams=None,
+            sex=sexes[patient],
+            repo_dir=config.REPO_PATH,
+            environment=environment,
+            run_GRIDSS=True if gridss_out is not None else False,
+        )
+
+        create_execution_script(
+            run_dir, patient, inputs_file, environment, custom_inputs
+        )
+
+
+def start_bam_analysis(
+    sample_tsv, ssm_out, sv_out, cnv_out, gridss_out, environment, resume, custom_inputs
+):
+    """Purpose: Start analysis with BAM input
+    Inputs:
+        - sample_tsv: the input BAM TSV
+        - ssm_out, sv_out, cnv_out: output directories
+        - resume: if True, only resubmit scripts to the HPF
+        - custom_inputs: if True, will not submit the script
+    Output: None
+    """
+    (
+        patients,
+        sexes,
+        tumor_samples,
+        normal_samples,
+        tumor_bams,
+        normal_bams,
+    ) = parse_bam_tab_file(sample_tsv)
+
+    if resume:
+        resume(patients, None, ssm_out, sv_out, cnv_out)
+        return
+
+    for patient in patients:
+        (
+            run_dir,
+            a_dirs,
+            ssm_dirs,
+            sv_dirs,
+            cnv_dirs,
+            gridss_dirs,
+        ) = prepare_directories(
+            patient=patient,
+            tumor_samples=tumor_samples[patient],
+            normal_samples=normal_samples[patient],
+            a_out=None,
+            ssm_out=ssm_out,
+            sv_out=sv_out,
+            cnv_out=cnv_out,
+            gridss_out=None,
+        )
+
+        inputs_file = create_inputs_file(
+            run_dir=run_dir,
+            a_dirs=None,
+            ssm_dirs=ssm_dirs,
+            sv_dirs=sv_dirs,
+            cnv_dirs=cnv_dirs,
+            gridss_dirs=gridss_dirs,
+            patient=patient,
+            normal_samples=normal_samples[patient],
+            tumor_samples=tumor_samples[patient],
+            fastqs=None,
+            lanes=None,
+            uuids=None,
+            libraries=None,
+            normal_bams=normal_bams[patient],
+            tumor_bams=tumor_bams[patient],
+            sex=sexes[patient],
+            repo_dir=config.REPO_PATH,
+            environment=environment,
+            run_GRIDSS=False,
+        )
+
+        create_execution_script(
+            run_dir, patient, inputs_file, environment, custom_inputs
+        )
+
+
+def start_analysis(
+    sample_tsv,
+    a_out,
+    ssm_out,
+    sv_out,
+    cnv_out,
+    gridss_out,
+    environment,
+    resume,
+    custom_inputs,
+):
+    """Purpose: Start the analysis
+    Inputs:
+        - sample_tsv: the input BAM TSV
+        - a_out, ssm_out, sv_out, cnv_out: output directories
+        - resume: if True, only resubmit scripts to the HPF
+        - custom_inputs: if True, will not submit the script
+    Output: None
+    """
+    if a_out is not None:
+        if gridss_out is not None:
+            if ssm_out is not None:
+                start_fastq_analysis(
+                    sample_tsv,
+                    a_out,
+                    ssm_out,
+                    sv_out,
+                    cnv_out,
+                    gridss_out,
+                    environment,
+                    resume,
+                    custom_inputs,
+                )
+            else:
+                print(
+                    "GRIDSS requires alignment and SSM to be run, please select SSM output dir"
+                )
+                sys.exit()
+        else:
+            start_fastq_analysis(
+                sample_tsv=sample_tsv,
+                a_out=a_out,
+                ssm_out=ssm_out,
+                sv_out=sv_out,
+                cnv_out=cnv_out,
+                gridss_out=None,
+                environment=environment,
+                resume=resume,
+                custom_inputs=custom_inputs,
+            )
+    else:
+        if gridss_out is None:
+            start_bam_analysis(
+                sample_tsv=sample_tsv,
+                ssm_out=ssm_out,
+                sv_out=sv_out,
+                cnv_out=cnv_out,
+                gridss_out=gridss_out,
+                environment=environment,
+                resume=resume,
+                custom_inputs=custom_inputs,
+            )
+        else:
+            print(
+                "GRIDSS requires alignment and SSM to be run, please select alignment output dir and supply fastq input"
+            )
+            sys.exit()
+
+
+if __name__ == "__main__":
+
+    # Process the command line input using argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "sample_tsv",
+        metavar="sample-tsv",
+        help="If starting analysis with alignment, this should be the path to a TSV "
+        "file listing FASTQ files. If starting analysis post-alignment, "
+        "this should be the path to a TSV file listing BAM files. -- Example "
+        "FASTQ input: %s -- Example BAM input: %s"
+        % (config.EXAMPLE_FASTQ_TAB_FILE, config.EXAMPLE_BAM_TAB_FILE),
+    )
+    parser.add_argument(
+        "-a-out",
+        help="Directory where a patient directory for alignment output will be "
+        "created. If this option is specified, analysis will begin with "
+        "alignment and the sample-tsv must be the FASTQ type.",
+    )
+    parser.add_argument(
+        "-ssm-out",
+        help="Directory where a patient directory for SSM output will be created. If "
+        "this option is specified, but -a-out is not, the sample-tsv must be the "
+        "BAM type.",
+    )
+    parser.add_argument(
+        "-sv-out",
+        help="Directory where a patient directory for SV output will be created. If "
+        "this option is specified, but -a-out is not, the sample-tsv must be the "
+        "BAM type.",
+    )
+    parser.add_argument(
+        "-cnv-out",
+        help="Directory where a patient directory for CNV output will be created. If "
+        "this option is specified, but -a-out is not, the sample-tsv must be the "
+        "BAM type.",
+    )
+    parser.add_argument(
+        "-gridss-out",
+        help="Directory where a patient directory for GRIDSS output will be created. "
+        "If this option is specified, then -a-out must also be specified, "
+        "the sample-tsv must be the FASTQ type.",
+    )
+    parser.add_argument(
+        "-environment",
+        default="LOCAL",
+        help="Environment where the workflow will be run; can be LOCAL or CLOUD",
+    )
+    parser.add_argument(
+        "--resume",
+        default=False,
+        action="store_true",
+        help="Use this option if you wish to resume a failed run. Ensure the provided "
+        "directories are the same as the original call.",
+    )
+    parser.add_argument(
+        "--custom-inputs",
+        default=False,
+        action="store_true",
+        help="If this option is specified, Cromwell will not be started "
+        "automatically, giving you an opportunity to specify custom input "
+        "values.",
+    )
+
+    args = parser.parse_args()
+
+    if not os.path.exists(args.sample_tsv):
+        parser.error("The supplied sample-tsv file does not exist.")
+
+    if (
+        (args.a_out is None)
+        and (args.ssm_out is None)
+        and (args.sv_out is None)
+        and (args.cnv_out is None)
+    ):
+        parser.error(
+            "At lease one output directory must be specified in order to start an "
+            "analysis. "
+        )
+
+    if args.environment not in ["LOCAL", "CLOUD"]:
+        parser.error("Environment must be either LOCAL or CLOUD")
+
+    a_out = args.a_out
+    ssm_out = args.ssm_out
+    sv_out = args.sv_out
+    cnv_out = args.cnv_out
+    gridss_out = args.gridss_out
+    environment = args.environment
+    if environment == "LOCAL":
+        if a_out is not None:
+            a_out = os.path.abspath(a_out)
+            print("Alignment output directory: " + a_out)
+            if not os.path.exists(a_out):
+                print(
+                    "Warning: the supplied alignment output directory does not exist, "
+                    "but it will be created. "
+                )
+        if ssm_out is not None:
+            ssm_out = os.path.abspath(ssm_out)
+            print("SSM output directory: " + ssm_out)
+            if not os.path.exists(ssm_out):
+                print(
+                    "Warning: the supplied SSM output directory does not exist, "
+                    "but it will be created. "
+                )
+        if sv_out is not None:
+            sv_out = os.path.abspath(sv_out)
+            print("SV output directory: " + sv_out)
+            if not os.path.exists(sv_out):
+                print(
+                    "Warning: the supplied SV output directory does not exist, but it "
+                    "will be created. "
+                )
+        if cnv_out is not None:
+            cnv_out = os.path.abspath(cnv_out)
+            print("CNV output directory: " + cnv_out)
+            if not os.path.exists(cnv_out):
+                print(
+                    "Warning: the supplied CNV output directory does not exist, "
+                    "but it will be created. "
+                )
+        if gridss_out is not None:
+            gridss_out = os.path.abspath(gridss_out)
+            print("GRIDSS output directory: " + gridss_out)
+            if not os.path.exists(gridss_out):
+                print(
+                    "Warning: the supplied GRIDSS output directory does not exist, "
+                    "but it will be created. "
+                )
+
+    start_analysis(
+        sample_tsv=args.sample_tsv,
+        a_out=a_out,
+        ssm_out=ssm_out,
+        sv_out=sv_out,
+        cnv_out=cnv_out,
+        gridss_out=gridss_out,
+        environment=environment,
+        resume=args.resume,
+        custom_inputs=args.custom_inputs,
+    )

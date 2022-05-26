@@ -1,0 +1,59 @@
+PYSAM_ZERO_BASED: 1
+sFilter:
+    tier1_filter:
+        tumor_reads_min: 4
+        normal_reads_max: 0
+    tier2_filter:
+        tumor_reads_min: 7
+        normal_reads_max: 1
+    breakpoint_window:
+        intrachromosomal_percent: 0.75
+        min_separation: 1000
+        window_size: 500
+    normal_any_MAPQ: True
+    PE: None
+    SR: None
+    TR: None
+    MAPQ: None
+
+cFilter:
+    normal_coverage_threshold:
+        window: 10000
+        threshold_min: 10
+    high_depth_filter:
+        window: 200
+    unique_mapping_tumor:
+        uniquely_mapped_ratio: 0.7
+    low_complexity:
+        distance_to_low_complexity: 400
+        low_complexity_min_length: 50
+    multi_mapping:
+        chromosomes: 4
+        reads: 3
+        window: 200
+
+bedFilter:
+    position1_uncertainty: 1000
+    position2_uncertainty: 1000
+
+baffler:
+    sequence_alignment:
+        gapopen: 10.0
+        gapextend: 1.0
+        identity_percent: 80.0
+        similarity_percent: 80.0
+        length_cutoff: 5
+    ratio_filter:
+        clipped_reads: 0.8
+        aligned_reads: 0.8
+    BAF:
+        extend_soft_clipped_side: 20
+        extend_mapped_side: 50
+        max_junction_diff: 10
+    max_coverage: 
+        coverage: 500
+        window: 1000
+
+detexy:
+    breakpoint_distance: 10000
+    reciprocal_distance: 200

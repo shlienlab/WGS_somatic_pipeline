@@ -1,0 +1,7 @@
+Patient	Sex	Sample	T/N	Library	R1_FastQ	R2_FastQ
+P1	XX	S0001	T	S0001.wgs	/path/to/S0001_L1_R1.fastq	/path/to/S0001_L1_R2.fastq
+P1	XX	S0001	T	S0001.wgs	/path/to/S0001_L2_R1.fastq	/path/to/S0001_L2_R2.fastq
+P1	XX	S0002	N	S0002.wgs	/path/to/S0002_R1.fastq	/path/to/S0002_R2.fastq
+P1	XX	S0003	T	S0003.wgs	/path/to/S0003_R1.fastq	/path/to/S0003_R2.fastq
+P2	XY	S0011	T	S0011.wgs	/path/to/S0011_R1.fastq	/path/to/S0011_R2.fastq
+P2	XY	S0012	N	S0012.wgs	/path/to/S0012_R1.fastq	/path/to/S0012_R2.fastq

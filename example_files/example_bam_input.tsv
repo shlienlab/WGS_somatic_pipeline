@@ -1,0 +1,6 @@
+Patient	Sex	Sample	T/N	Bam
+P1	XX	S0002	N	/path/to/normalS0002/bam
+P1	XX	S0001	T	/path/to/tumorS0001/bam
+P1	XX	S0003	T	/path/to/tumorS0003/bam
+P2	XY	S0014	N	/path/to/normalS0014/bam
+P2	XY	S0011	T	/path/to/tumorS0011/bam

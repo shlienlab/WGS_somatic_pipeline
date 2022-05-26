@@ -1,0 +1,21 @@
+{
+  "SomaticCancerGenomeAnalysis.align_output_dirs": {{ a_dirs | tojson }},
+  "SomaticCancerGenomeAnalysis.ssm_output_dirs": {{ ssm_dirs | tojson }},
+  "SomaticCancerGenomeAnalysis.sv_output_dirs": {{ sv_dirs | tojson }},
+  "SomaticCancerGenomeAnalysis.cnv_output_dirs": {{ cnv_dirs | tojson }},
+  "SomaticCancerGenomeAnalysis.gridss_output_dirs": {{ gridss_dirs | tojson }},
+  "SomaticCancerGenomeAnalysis.patient": {{ patient | tojson }},
+  "SomaticCancerGenomeAnalysis.normal_samples": {{ normal_samples | tojson }},
+  "SomaticCancerGenomeAnalysis.tumor_samples": {{ tumor_samples | tojson }},
+  "SomaticCancerGenomeAnalysis.fastqs": {{ fastqs | tojson }},
+  "SomaticCancerGenomeAnalysis.lanes": {{ lanes | tojson }},
+  "SomaticCancerGenomeAnalysis.uuids": {{ uuids | tojson }},
+  "SomaticCancerGenomeAnalysis.libraries": {{ libraries | tojson }},
+  "SomaticCancerGenomeAnalysis.normal_bams": {{ normal_bams | tojson }},
+  "SomaticCancerGenomeAnalysis.tumor_bams": {{ tumor_bams | tojson }},
+  "SomaticCancerGenomeAnalysis.sex": {{ sex | tojson }},
+  "SomaticCancerGenomeAnalysis.repo_dir": {{ repo_dir | tojson }},
+  "SomaticCancerGenomeAnalysis.environment": {{ environment | tojson }},
+  "SomaticCancerGenomeAnalysis.run_GRIDSS": {{ run_GRIDSS | tojson }},
+  "SomaticCancerGenomeAnalysis.random_number": {{ random_number | tojson }}
+}

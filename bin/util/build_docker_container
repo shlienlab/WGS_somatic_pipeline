@@ -1,0 +1,79 @@
+#!/bin/bash
+
+usage() {
+cat << EOF
+
+Build a docker container. This script should be called from the root of the repo dir.
+Usage: $0 container_name:tag
+
+Note: For this script to work, the first line of the Dockerfile you are trying to build must be formatted as follows:
+# TAG container_name:tag
+
+EOF
+}
+
+REPO_ROOT_DIR=$(pwd)
+
+if [ $# -ne 1 ]; then
+	usage
+	exit 1
+fi
+
+CONTAINER=$1
+
+CONTEXT_DIR=$(grep -rl "^# TAG ${CONTAINER}$" dockerfiles | sed 's/Dockerfile$//')
+if [ ! -d "${CONTEXT_DIR}" ]; then
+	echo "[ERROR] No unique containers found for container name [${CONTAINER}]"
+	echo "Context dir(s) for this container: [${CONTEXT_DIR}]"
+	exit 1
+fi
+
+if [ "${CONTAINER}" = "gcr.io/dnastack-dropbox-157402/private/profyle/shlienlab-python-libraries:3.5" ]; then
+	cp ./bin/sv/sketchy.py ${CONTEXT_DIR}/libraries/
+	cp ./bin/sv/UCSC_naming.py ${CONTEXT_DIR}/libraries/
+	cp ./bin/sv/vcf2tab.py ${CONTEXT_DIR}/scripts/
+elif [ "${CONTAINER}" = "gcr.io/dnastack-dropbox-157402/private/profyle/vcftools-perl:5.22.1" ]; then
+	cp ./bin/ssm/mutect2annovar.pl ${CONTEXT_DIR}/scripts/
+elif [ "${CONTAINER}" = "gcr.io/dnastack-dropbox-157402/private/profyle/shlienlab-filtering:3.6" ]; then
+	cp ./bin/filterpipeline/bedFilter.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/cFilter.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/config.yaml ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/pyfaidx.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/relffab.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/runFilters.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/SequenceFetcher.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/sFilter.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/filterpipeline/SmithWater.py ${CONTEXT_DIR}/filterpipeline/
+	cp ./bin/ssm/convert_mutect2_to_pype.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/cromwell_run_snv_postfiltering.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/cromwell_run_ssm_standard_filters.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/filter_clips.py ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/filter_clips.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/merge_annotations.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/mutect2annovar.pl ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/ssm_filtering_graph.R ${CONTEXT_DIR}/ssm/
+elif [ "${CONTAINER}" = "gcr.io/dnastack-dropbox-157402/private/profyle/shlienlab-libraries:3.4.0" ]; then
+	cp ./bin/align/barchart.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/create_cancer_gene_lists.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/create_configs_circos.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/filtering_rearrangements.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/merge_mutation_tabs.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/panel_of_normals.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/cnv/run_bicseq.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/sketchy.py ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/sv_filtering_graph.R ${CONTEXT_DIR}/scripts/
+	cp ./bin/sv/UCSC_naming.py ${CONTEXT_DIR}/scripts/
+	cp ./bin/ssm/convert_mutect2_to_pype.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/cromwell_run_snv_postfiltering.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/cromwell_run_ssm_standard_filters.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/filter_clips.py ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/filter_clips.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/merge_annotations.R ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/mutect2annovar.pl ${CONTEXT_DIR}/ssm/
+	cp ./bin/ssm/ssm_filtering_graph.R ${CONTEXT_DIR}/ssm/
+fi
+
+cd ${CONTEXT_DIR}
+docker build --rm -t "${CONTAINER}" .
+docker push "${CONTAINER}"
+cd ${REPO_ROOT_DIR}

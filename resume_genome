@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Find all analysis scripts in current directory and subdirectories
+FIND_CMD="find . -name *_analysis.sh"
+FOUND_FILES="$(${FIND_CMD})"
+NUM_FOUND_FILES=$(${FIND_CMD} | wc -l)
+
+# Exit if found multiple scripts
+if [ "${NUM_FOUND_FILES}" -gt "1" ]; then
+
+    echo "Error: Found more than one execution script"
+    exit 1
+
+# If found no script, check for ran_from.txt files, and find the
+# script they point to
+elif [ "${NUM_FOUND_FILES}" -eq "0" ]; then
+
+    # Find a ran from file. If we didn't find a script,
+    # we should be deep enough in the file structure that
+    # all the ran_from.txt files point to the same place
+    RAN_FROM_FIND_CMD="find . -name ran_from.txt -print -quit"
+    RAN_FROM_FILE="$(${RAN_FROM_FIND_CMD})"
+    NUM_RAN_FROM_FILES=$(${RAN_FROM_FIND_CMD} | wc -l)
+
+    # Exit if can't find any
+    if [ "${NUM_RAN_FROM_FILES}" -eq "0" ]; then
+        echo "Error: Could not find anything to resubmit"
+        exit 1
+    fi
+
+    # Get the script the ran_from.txt file points to
+    RAN_FROM=$(cat "${RAN_FROM_FILE}")
+    FOUND_FILES="$(find ${RAN_FROM} -name *_analysis.sh)"
+
+fi
+
+# Resubmit
+echo "Resubmitting ${FOUND_FILES}"
+qsub ${FOUND_FILES}

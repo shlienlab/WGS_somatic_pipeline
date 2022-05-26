@@ -1,0 +1,51 @@
+#!/bin/bash
+
+#PBS -S /bin/bash
+#PBS -N {{ execution_name }}
+#PBS -e {{ log_dir }}
+#PBS -o {{ log_dir }}
+#PBS -W umask=0117
+#PBS -l mem=30g
+#PBS -l walltime=240:00:00
+#PBS -l file=30gb
+#PBS -V
+#PBS -m ae
+
+ENVIRONMENT={{ environment}}
+
+if [ "$ENVIRONMENT" = "LOCAL" ]; then
+  set -eo pipefail
+	module load {{ java_version }}
+
+	cd {{ execution_dir }}
+
+  local_dir=/localhd/$PBS_JOBID
+  local_config=$local_dir/config
+  replace='REPLACE_ME'
+
+  sed 's,'"$replace"','"$local_dir"',' {{ cromwell_config_path }} > $local_config
+
+  ls -al $local_dir
+
+  cat $local_config
+
+	time \
+	java -Xmx5g \
+	-Dconfig.file=$local_config \
+	-jar {{ cromwell_jar_path }} \
+	run {{ workflow_path }} \
+	--inputs {{ inputs_path }}
+
+	echo EXIT STATUS $?
+
+	ls -al $local_dir
+
+elif [ "$ENVIRONMENT" = "CLOUD" ]; then
+	curl -X POST \
+		-n \
+		-H "accept: application/json" \
+		-H "Content-Type: multipart/form-data" \
+		-F "workflowSource=@{{ workflow_path }}" \
+		-F "workflowInputs=@{{ inputs_path }}" \
+		"{{ cromwell_cloud_url }}"
+fi
